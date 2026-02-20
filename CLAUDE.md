@@ -24,7 +24,8 @@ resources/js/
 │   ├── actors/
 │   │   ├── Actor.ts            # Facade: load model, animate, position, load extra animations
 │   │   ├── ActorAnimator.ts    # AnimationMixer wrapper: play, crossFadeTo, addClip(s)
-│   │   ├── ActorLoader.ts      # GLTFLoader: loadActorModel() + loadAnimationClips()
+│   │   ├── ActorLoader.ts      # GLTFLoader: loadActorModel() + loadAnimationSource()
+│   │   ├── AnimationRetargeter.ts # Cross-skeleton animation retargeting (see below)
 │   │   ├── CelShadingMaterial.ts   # MeshToonMaterial with stepped gradient map
 │   │   └── SilhouetteMaterial.ts   # Flat black MeshBasicMaterial (legacy, unused)
 │   ├── effects/
@@ -43,7 +44,8 @@ resources/js/
 public/models/actors/           # GLB files (gitignored, downloaded via artisan command)
 ├── tall-adult.glb              # Three.js Soldier (humanoid, 4 clips: TPose/Idle/Walk/Run)
 ├── stocky-adult.glb            # Three.js RobotExpressive (robot, 12+ clips)
-└── child.glb                   # Three.js Xbot (Mixamo rig)
+├── child.glb                   # Three.js Xbot (Mixamo rig)
+└── humanoid.glb                # Quaternius Universal Animation Library (127 clips, Unreal-style rig)
 
 app/Console/Commands/
 └── DownloadModels.php          # `php artisan models:download` — fetches sample GLBs
@@ -55,10 +57,29 @@ routes/web.php                  # /theatre route renders Theatre/Index
 
 - **Theatre engine is framework-agnostic.** Everything under `resources/js/theatre/` is plain TypeScript with zero Vue imports. Vue components mount it via `Engine.mount(canvas)`.
 - **EffectComposer pipeline.** Engine renders through Three.js EffectComposer (RenderPass → custom passes → OutputPass). Use `engine.addPass()` to insert passes before output.
-- **Actors own their animations.** `Actor.loadAnimations(url)` loads clips from separate GLB files (Mixamo workflow). `Actor.addClip(clip)` accepts programmatic AnimationClips.
+- **Actors own their animations.** `Actor.loadAnimations(url, boneMap?)` loads clips from separate GLB files. When a `BoneMap` is provided, clips are retargeted to the actor's skeleton. `Actor.addClip(clip)` accepts programmatic AnimationClips.
 - **Cel shading + silhouette outline.** Two independent systems: `CelShadingMaterial` applies MeshToonMaterial to meshes; `SilhouetteOutlinePass` does screen-space edge detection on a mask render for outer-contour-only outlines.
 - **shallowRef for Three.js objects in Vue.** Never use `ref()` for Three.js objects — Vue's deep reactivity proxies break them. Always `shallowRef`.
 - **Frame callback cleanup.** `engine.onFrame()` returns an unsubscribe function. All subsystems store and call it in their `dispose()`.
+
+## Animation Retargeting
+
+`AnimationRetargeter.ts` retargets animations between skeletons with different rest poses (e.g., Quaternius/Unreal-style → Mixamo). The source skeleton has non-identity rest quaternions encoding bone orientations; Mixamo has all-identity rest poses.
+
+**Correct formula:** `target_local = W_parent * Q_anim * inv(W)`
+
+- `W` = world rest quaternion of the bone (product of ALL ancestor bone rest quaternions)
+- `W_parent` = `W * inv(R_local)` = world rest of the parent bone chain
+- `Q_anim` = source animation quaternion
+
+This conjugates the parent-space delta by `W_parent`, transforming rotation axes from the source skeleton's rest-oriented frame into the target's identity-rest frame. Naive per-bone formulas (`inv(R) * Q`, `Q * inv(R)`, `R_target * inv(R_source) * Q`) all fail for arms because they don't account for ancestor rest poses compounding through the hierarchy. The naive formulas happen to work for legs because leg bones have pure X-axis rest rotations (which commute).
+
+**Key implementation details:**
+- Only retarget `.quaternion` tracks — position/scale encodes skeleton proportions
+- Collect world rest by accumulating through bone hierarchy only (skip non-bone ancestors)
+- GLTFLoader sanitizes bone names via `PropertyBinding.sanitizeNodeName()` — Mixamo's `mixamorig:Hips` becomes `mixamorigHips`
+- Root bone baking: source `root → pelvis` maps to target `Hips`; bake root animation tracks into pelvis
+- `BoneMap` is source → target; Three.js `SkeletonUtils.retargetClip` expects the inverse (don't use it)
 
 ## Getting Started
 
@@ -92,12 +113,12 @@ First prototype: loading and animating a humanoid actor with cel shading.
 - Height normalization for different model scales
 - Animation playback with crossfade transitions
 - Screen-space silhouette outline post-processing
-- WASD + arrow key camera controls
+- WASD + FPS mouse look camera controls (pointer lock)
 - Animation clip selector UI (vertical list panel)
 - Loading additional animation clips from separate GLB files
+- Cross-skeleton animation retargeting (Quaternius → Mixamo, 127 clips)
 
 **Next steps:**
-- Swap to a model with more animations (Stacy GLB has 10, or bundle Mixamo animations)
 - Programmatic animation creation (build clips in code)
 - @pmndrs/uikit 3D UI panels (currently set up but not used in demo scene)
 - Stage/environment design
