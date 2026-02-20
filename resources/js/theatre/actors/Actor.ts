@@ -1,6 +1,7 @@
 import { Box3, Vector3, type AnimationClip, type Scene, type Object3D } from 'three';
-import { loadActorModel, loadAnimationClips, type BodyProfile } from './ActorLoader';
+import { loadActorModel, loadAnimationSource, type BodyProfile } from './ActorLoader';
 import { ActorAnimator } from './ActorAnimator';
+import { retargetClips, type BoneMap } from './AnimationRetargeter';
 
 export class Actor {
     private animator!: ActorAnimator;
@@ -32,8 +33,12 @@ export class Actor {
         this.model.parent?.remove(this.model);
     }
 
-    async loadAnimations(url: string): Promise<string[]> {
-        const clips = await loadAnimationClips(url);
+    async loadAnimations(url: string, boneMap?: BoneMap): Promise<string[]> {
+        const { model: sourceModel, clips: sourceClips } = await loadAnimationSource(url);
+        let clips = sourceClips;
+        if (boneMap) {
+            clips = retargetClips(clips, boneMap, sourceModel, this.model);
+        }
         this.animator.addClips(clips);
         return clips.map((c) => c.name);
     }

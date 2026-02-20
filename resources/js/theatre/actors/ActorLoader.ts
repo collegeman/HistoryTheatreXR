@@ -31,7 +31,12 @@ export async function loadActorModel(
     return { model, clips: gltf.animations };
 }
 
-export async function loadAnimationClips(url: string): Promise<AnimationClip[]> {
+export interface AnimationSource {
+    model: Object3D;
+    clips: AnimationClip[];
+}
+
+export async function loadAnimationSource(url: string): Promise<AnimationSource> {
     const gltf: GLTF = await loader.loadAsync(url);
-    return gltf.animations;
+    return { model: gltf.scene, clips: gltf.animations };
 }

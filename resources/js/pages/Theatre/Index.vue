@@ -3,6 +3,7 @@ import { ref, shallowRef, onMounted } from 'vue';
 import { Head } from '@inertiajs/vue3';
 import TheatreCanvas from '@/components/TheatreCanvas.vue';
 import { Actor } from '@/theatre/actors/Actor';
+import { UAL_TO_MIXAMO } from '@/theatre/actors/AnimationRetargeter';
 import { SilhouetteOutlinePass } from '@/theatre/effects/SilhouetteOutlinePass';
 import {
     PlaneGeometry,
@@ -40,7 +41,8 @@ async function setupScene() {
     floor.rotation.x = -Math.PI / 2;
     scene.add(floor);
 
-    const actor = await Actor.load('/models/actors/tall-adult.glb');
+    const actor = await Actor.load('/models/actors/child.glb');
+    await actor.loadAnimations('/models/actors/humanoid.glb', UAL_TO_MIXAMO);
     actor.normalizeHeight(1.6);
     actor.addToScene(scene);
     actor.setPosition(0, 0, 0);
