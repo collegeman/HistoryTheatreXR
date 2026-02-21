@@ -5,10 +5,12 @@ const PI_2 = Math.PI / 2;
 const MAX_PITCH = PI_2 - 0.01;
 
 export class KeyboardCameraController {
+    private engine: Engine;
     private keys = new Set<string>();
     private yaw = 0;
     private pitch = 0;
     private locked = false;
+    private _enabled = true;
 
     private onKeyDown: (e: KeyboardEvent) => void;
     private onKeyUp: (e: KeyboardEvent) => void;
@@ -22,24 +24,26 @@ export class KeyboardCameraController {
     mouseSensitivity = 0.002;
 
     constructor(engine: Engine) {
+        this.engine = engine;
         this.canvas = engine.renderer.domElement;
 
-        const cam = engine.camera;
-        const euler = new Euler().setFromQuaternion(cam.quaternion, 'YXZ');
-        this.yaw = euler.y;
-        this.pitch = euler.x;
+        this.syncFromCamera();
 
-        this.onKeyDown = (e) => this.keys.add(e.code);
+        this.onKeyDown = (e) => {
+            if (!this._enabled) return;
+            this.keys.add(e.code);
+        };
         this.onKeyUp = (e) => this.keys.delete(e.code);
 
         this.onMouseMove = (e) => {
-            if (!this.locked) return;
+            if (!this._enabled || !this.locked) return;
             this.yaw -= e.movementX * this.mouseSensitivity;
             this.pitch -= e.movementY * this.mouseSensitivity;
             this.pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, this.pitch));
         };
 
         this.onClick = () => {
+            if (!this._enabled) return;
             if (!this.locked) {
                 this.canvas.requestPointerLock();
             }
@@ -57,8 +61,11 @@ export class KeyboardCameraController {
 
         const forward = new Vector3();
         const right = new Vector3();
+        const cam = engine.camera;
 
         this.unsubscribeFrame = engine.onFrame((delta) => {
+            if (!this._enabled) return;
+
             cam.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
 
             cam.getWorldDirection(forward);
@@ -74,6 +81,24 @@ export class KeyboardCameraController {
             if (this.keys.has('KeyA')) cam.position.addScaledVector(right, -speed);
             if (this.keys.has('KeyD')) cam.position.addScaledVector(right, speed);
         });
+    }
+
+    get enabled(): boolean {
+        return this._enabled;
+    }
+
+    setEnabled(value: boolean): void {
+        this._enabled = value;
+        if (!value) {
+            this.keys.clear();
+            if (this.locked) document.exitPointerLock();
+        }
+    }
+
+    syncFromCamera(): void {
+        const euler = new Euler().setFromQuaternion(this.engine.camera.quaternion, 'YXZ');
+        this.yaw = euler.y;
+        this.pitch = euler.x;
     }
 
     dispose(): void {

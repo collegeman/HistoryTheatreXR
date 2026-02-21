@@ -79,24 +79,22 @@ function collectBoneLocalRestPoses(root: Object3D): Map<string, Quaternion> {
     return poses;
 }
 
-// Accumulate world rest quaternions through the bone hierarchy only.
-// Non-bone ancestors (Armature, Scene) are skipped so the result
-// reflects bone-to-bone orientation, independent of scene placement.
+// Accumulate world rest quaternions through the full ancestor chain.
+// Non-bone ancestors (Armature nodes) may carry coordinate-system
+// rotations (e.g. Z-up → Y-up) that must be included so source and
+// target bone worlds are in the same scene-space frame.
 function collectBoneWorldRestPoses(root: Object3D): Map<string, Quaternion> {
     const worldPoses = new Map<string, Quaternion>();
 
-    function traverse(node: Object3D, parentBoneWorldQ: Quaternion) {
-        const isBone = (node as Bone).isBone;
-        const boneWorldQ = isBone
-            ? parentBoneWorldQ.clone().multiply(node.quaternion)
-            : parentBoneWorldQ;
+    function traverse(node: Object3D, parentWorldQ: Quaternion) {
+        const worldQ = parentWorldQ.clone().multiply(node.quaternion);
 
-        if (isBone) {
-            worldPoses.set(node.name, boneWorldQ.clone());
+        if ((node as Bone).isBone) {
+            worldPoses.set(node.name, worldQ.clone());
         }
 
         for (const child of node.children) {
-            traverse(child, boneWorldQ);
+            traverse(child, worldQ);
         }
     }
 
@@ -126,11 +124,70 @@ function collectQuaternionTrack(
     return null;
 }
 
+// Precomputed per-bone data for the retarget inner loop.
+interface BoneRetargetInfo {
+    targetTrackName: string;
+    wSourceParent: Quaternion;
+    wSourceInv: Quaternion;
+    wTarget: Quaternion;
+    wTargetParentInv: Quaternion;
+    isPelvis: boolean;
+}
+
+function buildBoneInfo(
+    sourceBone: string,
+    boneMap: BoneMap,
+    srcLocal: Map<string, Quaternion>,
+    srcWorld: Map<string, Quaternion>,
+    tgtLocal: Map<string, Quaternion>,
+    tgtWorld: Map<string, Quaternion>,
+    rootTrackValues: Float32Array | null,
+): BoneRetargetInfo | null {
+    const targetBoneRaw = boneMap[sourceBone];
+    if (!targetBoneRaw) return null;
+
+    const targetBone = PropertyBinding.sanitizeNodeName(targetBoneRaw);
+    const Rsrc = srcLocal.get(sourceBone);
+    const Wsrc = srcWorld.get(sourceBone);
+    const Rtgt = tgtLocal.get(targetBone);
+    const Wtgt = tgtWorld.get(targetBone);
+
+    if (!Rsrc || !Wsrc) return null;
+
+    const isPelvis = sourceBone === 'pelvis';
+    const rootLocalRest = srcLocal.get('root');
+
+    // Source: W_parent = W * inv(R)
+    let wSourceParent: Quaternion;
+    if (isPelvis && rootLocalRest && rootTrackValues) {
+        const rCombined = rootLocalRest.clone().multiply(Rsrc);
+        wSourceParent = Wsrc.clone().multiply(rCombined.clone().invert());
+    } else {
+        wSourceParent = Wsrc.clone().multiply(Rsrc.clone().invert());
+    }
+
+    // Target: W_parent = W * inv(R), default to identity if bone not found
+    const wtgt = Wtgt?.clone() ?? new Quaternion();
+    const rtgt = Rtgt?.clone() ?? new Quaternion();
+    const wTargetParentInv = wtgt.clone().multiply(rtgt.clone().invert()).invert();
+
+    return {
+        targetTrackName: targetBone + '.quaternion',
+        wSourceParent,
+        wSourceInv: Wsrc.clone().invert(),
+        wTarget: wtgt,
+        wTargetParentInv,
+        isPelvis,
+    };
+}
+
 export function retargetClip(
     clip: AnimationClip,
     boneMap: BoneMap,
-    sourceLocalRest: Map<string, Quaternion>,
-    sourceWorldRest: Map<string, Quaternion>,
+    srcLocal: Map<string, Quaternion>,
+    srcWorld: Map<string, Quaternion>,
+    tgtLocal: Map<string, Quaternion>,
+    tgtWorld: Map<string, Quaternion>,
     rootTrackValues: Float32Array | null,
 ): AnimationClip {
     const tracks: KeyframeTrack[] = [];
@@ -140,42 +197,10 @@ export function retargetClip(
         if (!parsed) continue;
         if (parsed.property !== 'quaternion') continue;
 
-        const targetBoneRaw = boneMap[parsed.bone];
-        if (!targetBoneRaw) continue;
-
-        const targetBone = PropertyBinding.sanitizeNodeName(targetBoneRaw);
-        const newName = targetBone + '.quaternion';
-
-        const R = sourceLocalRest.get(parsed.bone);
-        const W = sourceWorldRest.get(parsed.bone);
-
-        if (!R || !W) {
-            tracks.push(
-                new QuaternionKeyframeTrack(
-                    newName,
-                    Array.from(track.times),
-                    Array.from(track.values),
-                ),
-            );
-            continue;
-        }
-
-        // W_parent = W * inv(R): the world rest of the parent bone chain
-        // inv(W): inverse of this bone's world rest
-        //
-        // For the pelvis we bake the root bone's animation in, because the
-        // source has root→pelvis while the target has Hips as root.
-        const isPelvis = parsed.bone === 'pelvis';
-        const rootLocalRest = sourceLocalRest.get('root');
-
-        let wParent: Quaternion;
-        if (isPelvis && rootLocalRest && rootTrackValues) {
-            const rCombined = rootLocalRest.clone().multiply(R);
-            wParent = W.clone().multiply(rCombined.clone().invert());
-        } else {
-            wParent = W.clone().multiply(R.clone().invert());
-        }
-        const wInv = W.clone().invert();
+        const info = buildBoneInfo(
+            parsed.bone, boneMap, srcLocal, srcWorld, tgtLocal, tgtWorld, rootTrackValues,
+        );
+        if (!info) continue;
 
         const values = new Float32Array(track.values.length);
         const srcQ = new Quaternion();
@@ -190,7 +215,7 @@ export function retargetClip(
                 track.values[i + 3],
             );
 
-            if (isPelvis && rootTrackValues) {
+            if (info.isPelvis && rootTrackValues) {
                 rootQ.set(
                     rootTrackValues[i],
                     rootTrackValues[i + 1],
@@ -200,13 +225,16 @@ export function retargetClip(
                 srcQ.premultiply(rootQ);
             }
 
-            // Hierarchy-aware retarget:
-            //   target = W_parent * Q_anim * inv(W)
+            // General hierarchy-aware retarget formula:
+            //   target = inv(W_tgt_parent) * W_src_parent * Q * inv(W_src) * W_tgt
             //
-            // This conjugates the parent-space delta (Q * inv(R)) by W_parent,
-            // correctly transforming the rotation axis from the source bone's
-            // rest-oriented frame into the target's identity-rest frame.
-            outQ.copy(wParent).multiply(srcQ).multiply(wInv);
+            // Reduces to W_src_parent * Q * inv(W_src) when target rest = identity.
+            outQ.copy(info.wTargetParentInv)
+                .multiply(info.wSourceParent)
+                .multiply(srcQ)
+                .multiply(info.wSourceInv)
+                .multiply(info.wTarget);
+
             values[i] = outQ.x;
             values[i + 1] = outQ.y;
             values[i + 2] = outQ.z;
@@ -214,7 +242,11 @@ export function retargetClip(
         }
 
         tracks.push(
-            new QuaternionKeyframeTrack(newName, Array.from(track.times), Array.from(values)),
+            new QuaternionKeyframeTrack(
+                info.targetTrackName,
+                Array.from(track.times),
+                Array.from(values),
+            ),
         );
     }
 
@@ -227,12 +259,16 @@ export function retargetClips(
     sourceModel: Object3D,
     targetModel: Object3D,
 ): AnimationClip[] {
-    const sourceLocalRest = collectBoneLocalRestPoses(sourceModel);
-    const sourceWorldRest = collectBoneWorldRestPoses(sourceModel);
+    const srcLocal = collectBoneLocalRestPoses(sourceModel);
+    const srcWorld = collectBoneWorldRestPoses(sourceModel);
+    const tgtLocal = collectBoneLocalRestPoses(targetModel);
+    const tgtWorld = collectBoneWorldRestPoses(targetModel);
 
     return clips.map((clip) => {
         const rootTrackValues = collectQuaternionTrack(clip, 'root');
-        return retargetClip(clip, boneMap, sourceLocalRest, sourceWorldRest, rootTrackValues);
+        return retargetClip(
+            clip, boneMap, srcLocal, srcWorld, tgtLocal, tgtWorld, rootTrackValues,
+        );
     });
 }
 

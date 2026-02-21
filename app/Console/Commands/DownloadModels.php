@@ -15,7 +15,7 @@ class DownloadModels extends Command
     private const BASE_URL = 'https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf';
 
     private const MODELS = [
-        'tall-adult.glb' => 'Soldier.glb',
+        'tall-adult.glb' => 'Michelle.glb',
         'stocky-adult.glb' => 'RobotExpressive/RobotExpressive.glb',
         'child.glb' => 'Xbot.glb',
     ];
